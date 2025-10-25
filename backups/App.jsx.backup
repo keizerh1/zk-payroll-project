@@ -1,0 +1,264 @@
+import React, { useState, useEffect } from 'react';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { ethers } from 'ethers';
+import { Toaster, toast } from 'react-hot-toast';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+
+// Components
+import Navigation from './components/Navigation';
+import EmployerDashboard from './components/EmployerDashboard';
+import EmployeeDashboard from './components/EmployeeDashboard';
+import ConnectWallet from './components/ConnectWallet';
+
+// Utils
+import { initializeFHE, getFHEInstance } from './utils/fhevm';
+import { getPayrollContract, getTokenContract } from './utils/contracts';
+
+// Styles
+import './App.css';
+
+const queryClient = new QueryClient();
+
+function App() {
+  const [provider, setProvider] = useState(null);
+  const [signer, setSigner] = useState(null);
+  const [account, setAccount] = useState(null);
+  const [fheInstance, setFheInstance] = useState(null);
+  const [isEmployer, setIsEmployer] = useState(false);
+  const [isEmployee, setIsEmployee] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [networkReady, setNetworkReady] = useState(false);
+
+  // Initialisation au chargement
+  useEffect(() => {
+    checkConnection();
+  }, []);
+
+  // Vérifier si le wallet est déjà connecté
+  const checkConnection = async () => {
+    if (typeof window.ethereum !== 'undefined') {
+      try {
+        const accounts = await window.ethereum.request({ 
+          method: 'eth_accounts' 
+        });
+        
+        if (accounts.length > 0) {
+          await connectWallet();
+        }
+      } catch (error) {
+        console.error('Erreur lors de la vérification de connexion:', error);
+      }
+    }
+  };
+
+  // Connexion du wallet
+  const connectWallet = async () => {
+    if (typeof window.ethereum === 'undefined') {
+      toast.error('Veuillez installer MetaMask!');
+      return;
+    }
+
+    try {
+      setLoading(true);
+      toast.loading('Connexion en cours...');
+
+      // Demander l'accès au compte
+      const accounts = await window.ethereum.request({
+        method: 'eth_requestAccounts'
+      });
+
+      // Créer le provider et le signer
+      const web3Provider = new ethers.BrowserProvider(window.ethereum);
+      const web3Signer = await web3Provider.getSigner();
+      const userAccount = await web3Signer.getAddress();
+
+      setProvider(web3Provider);
+      setSigner(web3Signer);
+      setAccount(userAccount);
+
+      // Initialiser FHE
+      toast.loading('Initialisation du chiffrement FHE...');
+      const fhe = await initializeFHE(web3Provider);
+      setFheInstance(fhe);
+
+      // Vérifier le rôle de l'utilisateur
+      await checkUserRole(userAccount, web3Signer);
+
+      setNetworkReady(true);
+      toast.dismiss();
+      toast.success('Connecté avec succès!');
+    } catch (error) {
+      console.error('Erreur de connexion:', error);
+      toast.dismiss();
+      toast.error('Erreur de connexion au wallet');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Vérifier le rôle de l'utilisateur
+  const checkUserRole = async (userAccount, signer) => {
+    try {
+      const payroll = getPayrollContract(signer);
+      
+      // Vérifier si c'est l'employeur
+      const employerAddress = await payroll.employer();
+      const isEmployerCheck = employerAddress.toLowerCase() === userAccount.toLowerCase();
+      setIsEmployer(isEmployerCheck);
+
+      // Vérifier si c'est un employé
+      try {
+        const employeeInfo = await payroll.getEmployeeInfo(userAccount);
+        setIsEmployee(employeeInfo.isActive);
+      } catch (error) {
+        // Pas un employé
+        setIsEmployee(false);
+      }
+    } catch (error) {
+      console.error('Erreur lors de la vérification du rôle:', error);
+    }
+  };
+
+  // Déconnexion
+  const disconnectWallet = () => {
+    setProvider(null);
+    setSigner(null);
+    setAccount(null);
+    setFheInstance(null);
+    setIsEmployer(false);
+    setIsEmployee(false);
+    setNetworkReady(false);
+    toast.success('Déconnecté');
+  };
+
+  // Écouter les changements de compte
+  useEffect(() => {
+    if (typeof window.ethereum !== 'undefined') {
+      window.ethereum.on('accountsChanged', (accounts) => {
+        if (accounts.length === 0) {
+          disconnectWallet();
+        } else {
+          connectWallet();
+        }
+      });
+
+      window.ethereum.on('chainChanged', () => {
+        window.location.reload();
+      });
+    }
+
+    return () => {
+      if (typeof window.ethereum !== 'undefined') {
+        window.ethereum.removeAllListeners('accountsChanged');
+        window.ethereum.removeAllListeners('chainChanged');
+      }
+    };
+  }, []);
+
+  return (
+    <QueryClientProvider client={queryClient}>
+      <Router>
+        <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900">
+          <Toaster 
+            position="top-right"
+            toastOptions={{
+              duration: 4000,
+              style: {
+                background: '#1e293b',
+                color: '#fff',
+                border: '1px solid #334155'
+              }
+            }}
+          />
+
+          <Navigation 
+            account={account}
+            isEmployer={isEmployer}
+            isEmployee={isEmployee}
+            onConnect={connectWallet}
+            onDisconnect={disconnectWallet}
+          />
+
+          <main className="container mx-auto px-4 py-8">
+            {!account ? (
+              <ConnectWallet onConnect={connectWallet} loading={loading} />
+            ) : (
+              <Routes>
+                <Route 
+                  path="/employer" 
+                  element={
+                    isEmployer ? (
+                      <EmployerDashboard 
+                        signer={signer}
+                        fheInstance={fheInstance}
+                        account={account}
+                      />
+                    ) : (
+                      <Navigate to="/" replace />
+                    )
+                  } 
+                />
+                <Route 
+                  path="/employee" 
+                  element={
+                    isEmployee ? (
+                      <EmployeeDashboard 
+                        signer={signer}
+                        fheInstance={fheInstance}
+                        account={account}
+                      />
+                    ) : (
+                      <Navigate to="/" replace />
+                    )
+                  } 
+                />
+                <Route 
+                  path="/" 
+                  element={
+                    <div className="text-center py-20">
+                      <h1 className="text-4xl font-bold text-white mb-4">
+                        🔐 ZK-Payroll
+                      </h1>
+                      <p className="text-xl text-slate-300 mb-8">
+                        Système de paie confidentiel sur blockchain avec FHE
+                      </p>
+                      {isEmployer && (
+                        <a 
+                          href="/employer"
+                          className="inline-block bg-purple-600 hover:bg-purple-700 text-white px-8 py-3 rounded-lg font-semibold transition-colors"
+                        >
+                          Accéder au Dashboard Employeur
+                        </a>
+                      )}
+                      {isEmployee && !isEmployer && (
+                        <a 
+                          href="/employee"
+                          className="inline-block bg-blue-600 hover:bg-blue-700 text-white px-8 py-3 rounded-lg font-semibold transition-colors"
+                        >
+                          Accéder au Dashboard Employé
+                        </a>
+                      )}
+                      {!isEmployer && !isEmployee && (
+                        <div className="bg-slate-800 rounded-lg p-8 max-w-md mx-auto">
+                          <p className="text-slate-300">
+                            Vous n'êtes ni employeur ni employé dans ce système.
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  } 
+                />
+              </Routes>
+            )}
+          </main>
+
+          <footer className="text-center py-8 text-slate-400">
+            <p>Propulsé par Zama FHE • Blockchain Confidentielle</p>
+          </footer>
+        </div>
+      </Router>
+    </QueryClientProvider>
+  );
+}
+
+export default App;
